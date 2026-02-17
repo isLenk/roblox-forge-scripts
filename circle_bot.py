@@ -20,6 +20,7 @@ Dependencies:
   pip install opencv-python numpy mss keyboard
 """
 
+import cv2.load_config_py3  # noqa: F401 – force PyInstaller to bundle this
 import cv2
 import numpy as np
 import mss
