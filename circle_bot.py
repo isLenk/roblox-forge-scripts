@@ -1355,25 +1355,27 @@ class LenkTools:
         self._pa_time1_var.trace_add('write', _sync_pa_times)
         self._pa_time2_var.trace_add('write', _sync_pa_times)
 
-        # ---- Hotkeys toggle button ----
+        # ---- Bottom buttons ----
+        bottom_frame = tk.Frame(self.root, bg=BG)
+        bottom_frame.pack(side=tk.BOTTOM, fill='x', pady=(0, 8))
+
         self.hotkey_btn = tk.Button(
-            self.root, text='Hotkeys: ON', font=('Consolas', 10, 'bold'),
+            bottom_frame, text='Hotkeys: ON', font=('Consolas', 10, 'bold'),
             fg='#50fa7b', bg=BORDER, activebackground='#30363d',
             activeforeground='#50fa7b', bd=0, relief='flat',
             padx=12, pady=4,
             command=self._toggle_hotkeys
         )
-        self.hotkey_btn.pack(pady=(8, 4))
+        self.hotkey_btn.pack(pady=(0, 4))
 
-        # ---- Macro Editor button ----
         self.macro_btn = tk.Button(
-            self.root, text='\u2630 Macro Editor', font=('Consolas', 10, 'bold'),
+            bottom_frame, text='\u2630 Macro Editor', font=('Consolas', 10, 'bold'),
             fg='#bd93f9', bg=BORDER, activebackground='#30363d',
             activeforeground='#bd93f9', bd=0, relief='flat',
             padx=12, pady=4,
             command=self._toggle_macro_panel
         )
-        self.macro_btn.pack(pady=(0, 6))
+        self.macro_btn.pack()
 
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
 
