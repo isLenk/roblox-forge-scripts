@@ -234,6 +234,7 @@ class LenkTools:
         self._auto_sell_executing = False
         self._auto_sell_overlays = []
         self.auto_sell_camlock = False
+        self._auto_sell_deadline = 0  # timestamp of next sell
         self._load_auto_sell()
 
         # Auto-phase state (I -> O -> P, advances on GO screen)
@@ -1286,11 +1287,12 @@ class LenkTools:
             self._execute_auto_sell()
 
             # Wait for interval
-            deadline = time.time() + self.auto_sell_interval
-            while time.time() < deadline:
+            self._auto_sell_deadline = time.time() + self.auto_sell_interval
+            while time.time() < self._auto_sell_deadline:
                 if self._auto_sell_stop or not self.auto_sell_active or not self.running:
                     break
                 time.sleep(0.1)
+            self._auto_sell_deadline = 0
 
     # ---------------------------------------------- Periodic Attack (autoclick sub-feature)
     def toggle_periodic_attack(self):
@@ -2330,6 +2332,8 @@ class LenkTools:
         else:
             self.focus_lbl.config(text="\u25CF  ROBLOX: Not Focused", fg="#ff5555")
         self.root.after(500, self._update_focus_label)
+        if self.auto_sell_active:
+            self._refresh_gui()
         # Update game detection every cycle
         self._update_game_label()
 
@@ -2510,8 +2514,18 @@ class LenkTools:
             self._pa_dot.config(fg='#ff5555')
 
         if self.auto_sell_active:
-            self.as_lbl.config(text='Auto Sell: ON', fg='#50fa7b')
-            self._as_dot.config(fg='#50fa7b')
+            remaining = self._auto_sell_deadline - time.time()
+            if self._auto_sell_executing:
+                self.as_lbl.config(text='Auto Sell: SELLING', fg='#ff79c6')
+                self._as_dot.config(fg='#ff79c6')
+            elif remaining > 0:
+                self.as_lbl.config(
+                    text=f'Auto Sell: {self._fmt_interval(remaining)}',
+                    fg='#50fa7b')
+                self._as_dot.config(fg='#50fa7b')
+            else:
+                self.as_lbl.config(text='Auto Sell: ON', fg='#50fa7b')
+                self._as_dot.config(fg='#50fa7b')
         else:
             self.as_lbl.config(text='Auto Sell: OFF', fg='#484f58')
             self._as_dot.config(fg='#ff5555')
