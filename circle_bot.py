@@ -1020,11 +1020,53 @@ class LenkTools:
         DIM = '#484f58'
 
         self.root = tk.Tk()
-        self.root.title(f"LENK.TOOLS v{VERSION}")
+        self.root.overrideredirect(True)
         self.root.geometry("350x530+10+10")
         self.root.attributes('-topmost', True)
         self.root.resizable(False, False)
         self.root.configure(bg=BG)
+
+        # ---- Custom title bar ----
+        titlebar = tk.Frame(self.root, bg=BG, height=30)
+        titlebar.pack(fill='x')
+        titlebar.pack_propagate(False)
+
+        title_lbl = tk.Label(
+            titlebar, text=f"LENK.TOOLS v{VERSION}",
+            font=("Consolas", 9, "bold"), fg=DIM, bg=BG)
+        title_lbl.pack(side=tk.LEFT, padx=10)
+
+        # Close button
+        close_btn = tk.Label(
+            titlebar, text='\u2715', font=('Consolas', 10),
+            fg=DIM, bg=BG, padx=10, cursor='hand2')
+        close_btn.pack(side=tk.RIGHT, fill='y')
+        close_btn.bind('<Button-1>', lambda e: self._quit())
+        close_btn.bind('<Enter>', lambda e: close_btn.config(fg='#ff5555', bg='#1a0000'))
+        close_btn.bind('<Leave>', lambda e: close_btn.config(fg=DIM, bg=BG))
+
+        # Minimize button
+        min_btn = tk.Label(
+            titlebar, text='\u2500', font=('Consolas', 10),
+            fg=DIM, bg=BG, padx=10, cursor='hand2')
+        min_btn.pack(side=tk.RIGHT, fill='y')
+        min_btn.bind('<Button-1>', lambda e: self._minimize())
+        min_btn.bind('<Enter>', lambda e: min_btn.config(fg='#c9d1d9', bg='#161b22'))
+        min_btn.bind('<Leave>', lambda e: min_btn.config(fg=DIM, bg=BG))
+
+        # Dragging
+        def _start_drag(event):
+            self._drag_x = event.x
+            self._drag_y = event.y
+
+        def _on_drag(event):
+            x = self.root.winfo_x() + event.x - self._drag_x
+            y = self.root.winfo_y() + event.y - self._drag_y
+            self.root.geometry(f"+{x}+{y}")
+
+        for w in (titlebar, title_lbl):
+            w.bind('<Button-1>', _start_drag)
+            w.bind('<B1-Motion>', _on_drag)
 
         # ---- Header bar ----
         header = tk.Frame(self.root, bg=BG2)
@@ -2551,6 +2593,16 @@ class LenkTools:
         except Exception as e:
             print(f"[MACRO] Hotkey error: {e}")
         print(f"[MACRO] Record hotkey changed to '{new_key}'")
+
+    # ------------------------------------------------------------ Minimize
+    def _minimize(self):
+        self.root.overrideredirect(False)
+        self.root.iconify()
+        def _restore(event):
+            self.root.overrideredirect(True)
+            self.root.attributes('-topmost', True)
+            self.root.unbind('<Map>')
+        self.root.bind('<Map>', _restore)
 
     # --------------------------------------------------------------- Exit
     def _quit(self):
