@@ -99,8 +99,38 @@ def apply_update(download_url):
 
 
 def restart():
-    """Restart the application."""
-    subprocess.Popen([sys.executable] + sys.argv[1:])
+    """Restart via a helper batch script that waits for this process to exit first.
+
+    This prevents two PyInstaller --onefile processes from running at the same
+    time, which causes base_library.zip extraction conflicts.
+    """
+    current_exe = sys.executable
+    old_path = current_exe + ".old"
+    pid = os.getpid()
+
+    # Write a temporary batch script that:
+    # 1. Waits for our PID to disappear
+    # 2. Cleans up the .old exe
+    # 3. Launches the new exe
+    # 4. Deletes itself
+    bat_fd, bat_path = tempfile.mkstemp(suffix=".bat")
+    with os.fdopen(bat_fd, "w") as f:
+        f.write(f"""@echo off
+:wait
+tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
+if not errorlevel 1 (
+    timeout /t 1 /nobreak >nul
+    goto wait
+)
+if exist "{old_path}" del /f "{old_path}"
+start "" "{current_exe}"
+del "%~f0"
+""")
+
+    subprocess.Popen(
+        ["cmd.exe", "/c", bat_path],
+        creationflags=0x00000008,  # DETACHED_PROCESS
+    )
     sys.exit(0)
 
 
@@ -119,9 +149,4 @@ def run_update_check():
     print(f"[UPDATER] New version available: {tag}")
 
     if apply_update(url):
-        # Clean up the .old file after a short delay via a detached command
-        old_path = sys.executable + ".old"
-        cleanup_cmd = f'ping -n 3 127.0.0.1 >nul & del "{old_path}"'
-        subprocess.Popen(cleanup_cmd, shell=True,
-                         creationflags=0x00000008)  # DETACHED_PROCESS
         restart()
