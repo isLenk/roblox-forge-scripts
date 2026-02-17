@@ -1244,14 +1244,14 @@ class LenkTools:
                 time.sleep(0.3)
 
             steps = [
-                ('t_key', None),
-                ('click', 'sell_items'),
-                ('click', 'select_all'),
-                ('click', 'accept'),
-                ('click', 'yes'),
-                ('click', 'close'),
+                ('t_key', None, 2.0),
+                ('click', 'sell_items', 2.0),
+                ('click', 'select_all', 2.0),
+                ('click', 'accept', 4.0),
+                ('click', 'yes', 2.0),
+                ('click', 'close', 2.0),
             ]
-            for step_type, target in steps:
+            for step_type, target, delay in steps:
                 if self._auto_sell_stop or not self.auto_sell_active:
                     return
                 if step_type == 't_key':
@@ -1260,8 +1260,7 @@ class LenkTools:
                     pos = self.auto_sell_positions.get(target)
                     if pos:
                         self._click_at_screen(pos[0], pos[1])
-                # 4 second gap between each step
-                deadline = time.time() + 4.0
+                deadline = time.time() + delay
                 while time.time() < deadline:
                     if self._auto_sell_stop or not self.auto_sell_active or not self.running:
                         return
