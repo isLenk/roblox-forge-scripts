@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller opencv-python numpy mss keyboard mouse
+          pip install pyinstaller opencv-python-headless numpy mss keyboard mouse
 
       - name: Read version
         id: version
@@ -33,7 +33,7 @@ jobs:
               gh.write(f"version={VERSION}\n")
 
       - name: Build exe
-        run: pyinstaller --onefile --uac-admin --name LENK.TOOLS --noconsole --collect-all cv2 circle_bot.py
+        run: pyinstaller --onefile --uac-admin --name LENK.TOOLS --noconsole --clean circle_bot.py
 
       - name: Check if release exists
         id: check_release

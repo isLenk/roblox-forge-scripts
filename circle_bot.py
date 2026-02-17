@@ -1702,20 +1702,26 @@ class LenkTools:
                 def _dbg_resize(img):
                     return cv2.resize(img, None, fx=dbg_scale, fy=dbg_scale,
                                       interpolation=cv2.INTER_AREA)
-                cv2.imshow("Preview", _dbg_resize(preview))
-                cv2.imshow("Green Mask", _dbg_resize(green_mask))
-                cv2.imshow("White Mask", _dbg_resize(white_mask))
-                cv2.imshow("Bar Yellow", _dbg_resize(bar_yellow_mask))
-                cv2.imshow("Bar White", _dbg_resize(bar_white_mask))
-                cv2.waitKey(1)
+                try:
+                    cv2.imshow("Preview", _dbg_resize(preview))
+                    cv2.imshow("Green Mask", _dbg_resize(green_mask))
+                    cv2.imshow("White Mask", _dbg_resize(white_mask))
+                    cv2.imshow("Bar Yellow", _dbg_resize(bar_yellow_mask))
+                    cv2.imshow("Bar White", _dbg_resize(bar_white_mask))
+                    cv2.waitKey(1)
+                except cv2.error:
+                    pass
                 time.sleep(0.03)
                 continue
 
             # Clean up debug windows when debug turns off
             if debug_was_on:
                 debug_was_on = False
-                cv2.destroyAllWindows()
-                cv2.waitKey(1)
+                try:
+                    cv2.destroyAllWindows()
+                    cv2.waitKey(1)
+                except cv2.error:
+                    pass
 
             # Update monitor in case user changed it
             mon = self.monitor_rect
