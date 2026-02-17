@@ -40,6 +40,7 @@ try:
 except ImportError:
     mouse = None
 from tkinter import ttk, simpledialog
+from wiki import WikiWindow, WikiSearchOverlay, load_wiki_data, save_wiki_data
 
 # Fix DPI scaling on Windows so screen coords match pixel coords
 try:
@@ -185,6 +186,8 @@ class LenkTools:
              'state': lambda: self.forge_enabled},
             {'label': 'Mini', 'icon': '\u25CB', 'toggle': self._toggle_mini_mode,
              'state': lambda: self._mini_mode},
+            {'label': 'Wiki', 'icon': '\U0001f4d6', 'toggle': self._radial_wiki_search,
+             'state': lambda: self.wiki_panel_open},
         ]
 
         # Mini mode state
@@ -211,6 +214,10 @@ class LenkTools:
         self._macro_last_event_time = 0
         self._macro_replay_thread = None
         self._macro_replay_stop = False
+
+        # Wiki state
+        self.wiki_panel_open = False
+        self.wiki_panel = None
 
         # Periodic attack state (sub-feature of autoclicker)
         self.periodic_attack = False
@@ -1853,6 +1860,13 @@ class LenkTools:
         )
         self.macro_btn.pack(side=tk.LEFT, expand=True, padx=(4, 4))
 
+        self.wiki_btn = tk.Button(
+            bottom_frame, text='\U0001f4d6 Wiki', font=('Consolas', 10, 'bold'),
+            fg='#58a6ff', bg=BORDER, activebackground='#30363d',
+            activeforeground='#58a6ff', bd=0, relief='flat',
+            padx=12, pady=4, command=self._toggle_wiki_panel)
+        self.wiki_btn.pack(side=tk.LEFT, expand=True, padx=(4, 4))
+
         self.debug_btn = tk.Button(
             bottom_frame, text='\U0001f41b', font=('Segoe UI Emoji', 10),
             fg='#484f58', bg=BORDER, activebackground='#30363d',
@@ -2320,6 +2334,51 @@ class LenkTools:
                 ring_shown = False
 
             time.sleep(0.003)  # ~300 fps cap
+
+    # --------------------------------------------------------- Wiki Panel
+    def _toggle_wiki_panel(self):
+        """Open or close the wiki panel."""
+        if self.wiki_panel_open and self.wiki_panel:
+            try:
+                self.wiki_panel.destroy()
+            except Exception:
+                pass
+            self.wiki_panel_open = False
+            self.wiki_panel = None
+            return
+        data = load_wiki_data()
+        self.wiki_panel = WikiWindow(self.root, data)
+        self.wiki_panel_open = True
+
+        # Watch for panel close
+        orig_close = self.wiki_panel._on_close
+
+        def _wrapped_close():
+            orig_close()
+            self.wiki_panel_open = False
+            self.wiki_panel = None
+
+        self.wiki_panel._on_close = _wrapped_close
+
+    def _radial_wiki_search(self):
+        """Open the floating wiki search bar from the radial menu."""
+        data = load_wiki_data()
+
+        def _open_wiki(entry_name):
+            if not self.wiki_panel_open or not self.wiki_panel:
+                self.wiki_panel = WikiWindow(self.root, data)
+                self.wiki_panel_open = True
+                orig_close = self.wiki_panel._on_close
+
+                def _wrapped_close():
+                    orig_close()
+                    self.wiki_panel_open = False
+                    self.wiki_panel = None
+
+                self.wiki_panel._on_close = _wrapped_close
+            self.wiki_panel.navigate_to(entry_name)
+
+        WikiSearchOverlay(self.root, data, _open_wiki)
 
     # --------------------------------------------------------- Macro Editor
     def _macro_save_path(self):
