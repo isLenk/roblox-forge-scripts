@@ -33,7 +33,7 @@ jobs:
               gh.write(f"version={VERSION}\n")
 
       - name: Build exe
-        run: pyinstaller --onefile --uac-admin --name LENK.TOOLS --noconsole --collect-submodules cv2 circle_bot.py
+        run: pyinstaller --onefile --uac-admin --name LENK.TOOLS --noconsole --collect-all cv2 circle_bot.py
 
       - name: Check if release exists
         id: check_release
