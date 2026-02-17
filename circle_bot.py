@@ -1025,6 +1025,18 @@ class LenkTools:
         self.root.resizable(False, False)
         self.root.configure(bg=BG)
 
+        # ---- Dotted background pattern ----
+        W, H = 350, 530
+        DOT_SPACING = 18
+        DOT_COLOR = '#1a1f27'
+        self._bg_img = tk.PhotoImage(width=W, height=H)
+        self._bg_img.put(BG, to=(0, 0, W, H))
+        for y in range(0, H, DOT_SPACING):
+            for x in range(0, W, DOT_SPACING):
+                self._bg_img.put(DOT_COLOR, to=(x, y, x + 2, y + 2))
+        tk.Label(self.root, image=self._bg_img, bd=0
+                 ).place(x=0, y=0, relwidth=1, relheight=1)
+
         # ---- Custom title bar ----
         titlebar = tk.Frame(self.root, bg=BG, height=30)
         titlebar.pack(fill='x')
