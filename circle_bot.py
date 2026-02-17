@@ -39,7 +39,7 @@ try:
     import mouse
 except ImportError:
     mouse = None
-from tkinter import ttk, simpledialog
+from tkinter import ttk, simpledialog, messagebox
 from wiki import WikiWindow, WikiSearchOverlay, load_wiki_data, save_wiki_data
 
 # Fix DPI scaling on Windows so screen coords match pixel coords
@@ -226,6 +226,15 @@ class LenkTools:
         self.periodic_interval1 = 3.0  # cycle period in seconds
         self.periodic_delay2 = 1.0     # delay before second key press
 
+        # Auto Sell state
+        self.auto_sell_positions = {}   # {'sell_items': (x,y), ...}
+        self.auto_sell_active = False
+        self.auto_sell_interval = 300   # seconds (default 5min)
+        self._auto_sell_stop = False
+        self._auto_sell_executing = False
+        self._auto_sell_overlays = []
+        self._load_auto_sell()
+
         # Auto-phase state (I -> O -> P, advances on GO screen)
         self.auto_phase = False
         self.phase_idx = 0  # 0=jiggle, 1=bar_game, 2=circle
@@ -259,6 +268,7 @@ class LenkTools:
         Thread(target=self._hold_left_loop, daemon=True).start()
         Thread(target=self._sprint_loop, daemon=True).start()
         Thread(target=self._periodic_attack_loop, daemon=True).start()
+        Thread(target=self._auto_sell_loop, daemon=True).start()
 
     # ------------------------------------------------------ Hotkeys toggle
     def _toggle_hotkeys(self):
@@ -378,6 +388,8 @@ class LenkTools:
             features.append(('Sprint', '#50fa7b'))
         if self.periodic_attack:
             features.append(('Periodic', '#bd93f9'))
+        if self.auto_sell_active:
+            features.append(('AutoSell', '#ff79c6'))
 
         # Rebuild labels only when the set of active features changes
         active_keys = tuple((n, c) for n, c in features)
@@ -942,7 +954,7 @@ class LenkTools:
     def _autoclicker_loop(self):
         """Click at cursor position every 0.1s while active and Roblox is focused."""
         while self.running:
-            if not self.autoclicker or not self._roblox_focused():
+            if not self.autoclicker or not self._roblox_focused() or self._auto_sell_executing:
                 time.sleep(0.05)
                 continue
             abs_x, abs_y, _, _ = self._get_abs_coords()
@@ -950,6 +962,299 @@ class LenkTools:
             time.sleep(0.03)
             self._send_mouse(0x8000 | 0x4000 | 0x0004, abs_x, abs_y)
             time.sleep(0.07)
+
+    # ---------------------------------------------- Auto Sell
+    def _auto_sell_save_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), 'autosell.json')
+
+    def _load_auto_sell(self):
+        path = self._auto_sell_save_path()
+        if os.path.exists(path):
+            try:
+                with open(path, 'r') as f:
+                    data = json.load(f)
+                # Convert lists back to tuples
+                self.auto_sell_positions = {
+                    k: tuple(v) for k, v in data.get('positions', {}).items()
+                }
+                self.auto_sell_interval = data.get('interval', 300)
+            except Exception:
+                self.auto_sell_positions = {}
+        else:
+            self.auto_sell_positions = {}
+
+    def _save_auto_sell(self):
+        try:
+            data = {
+                'positions': self.auto_sell_positions,
+                'interval': self.auto_sell_interval,
+            }
+            with open(self._auto_sell_save_path(), 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            print(f"[AUTO-SELL] Save error: {e}")
+
+    @staticmethod
+    def _fmt_interval(seconds):
+        """Format seconds as human-readable e.g. '5m 0s'."""
+        seconds = int(seconds)
+        m, s = divmod(seconds, 60)
+        if m:
+            return f"{m}m {s}s"
+        return f"{s}s"
+
+    def _on_auto_sell_slider(self, val):
+        self.auto_sell_interval = int(val)
+        self._as_interval_lbl.config(text=self._fmt_interval(self.auto_sell_interval))
+        self._save_auto_sell()
+
+    def _toggle_auto_sell(self):
+        if not self.auto_sell_positions:
+            print("[AUTO-SELL] No positions configured. Run Setup first.")
+            return
+        self.auto_sell_active = not self.auto_sell_active
+        self.root.after(0, self._refresh_gui)
+        print(f"[AUTO-SELL] {'ON' if self.auto_sell_active else 'OFF'}")
+
+    def _wait_for_click_or_esc(self):
+        """Block until the user left-clicks or presses Escape.
+
+        Returns (x, y) on click, or None if cancelled with Escape.
+        """
+        import threading
+        result = [None]
+        cancelled = [False]
+        evt = threading.Event()
+
+        def on_esc(_):
+            cancelled[0] = True
+            evt.set()
+
+        esc_hook = keyboard.on_press_key('escape', on_esc)
+
+        if mouse:
+            def on_click():
+                pt = ctypes.wintypes.POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                result[0] = (pt.x, pt.y)
+                evt.set()
+            mouse_hook = mouse.on_click(on_click)
+            evt.wait()
+            mouse.unhook(mouse_hook)
+        else:
+            # Fallback: poll GetAsyncKeyState for left-click
+            while not evt.is_set():
+                if ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000:
+                    pt = ctypes.wintypes.POINT()
+                    ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                    while ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000:
+                        time.sleep(0.01)
+                    result[0] = (pt.x, pt.y)
+                    break
+                time.sleep(0.01)
+
+        keyboard.unhook_key(esc_hook)
+        if cancelled[0]:
+            return None
+        return result[0]
+
+    def _auto_sell_setup(self):
+        """Wizard to capture button positions for auto-sell.
+
+        Shows a floating label that follows the cursor indicating
+        which button to click next.  Each click is captured silently.
+        Press Escape at any time to cancel.
+        """
+        steps = [
+            ('sell_items', 'Click: Sell Items'),
+            ('select_all', 'Click: Select All'),
+            ('accept', 'Click: Accept'),
+            ('yes', 'Click: Yes'),
+            ('close', 'Click: X (close)'),
+        ]
+        positions = {}
+
+        # --- floating cursor label ---
+        TRANS = '#010101'
+        tip = [None, None]  # [window, label]
+
+        def _create_tip(text):
+            w = tk.Toplevel(self.root)
+            w.overrideredirect(True)
+            w.attributes('-topmost', True)
+            w.attributes('-transparentcolor', TRANS)
+            w.configure(bg=TRANS)
+            lbl = tk.Label(w, text=text,
+                           font=('Consolas', 11, 'bold'),
+                           fg='#ff79c6', bg='#0d1117',
+                           padx=6, pady=2)
+            lbl.pack()
+            tip[0] = w
+            tip[1] = lbl
+
+        def _update_tip_pos():
+            w = tip[0]
+            if w is None:
+                return
+            try:
+                pt = ctypes.wintypes.POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                w.geometry(f'+{pt.x + 18}+{pt.y + 18}')
+            except Exception:
+                pass
+            if w.winfo_exists():
+                w.after(16, _update_tip_pos)
+
+        def _set_tip_text(text):
+            if tip[0] is not None:
+                tip[1].config(text=text)
+
+        def _destroy_tip():
+            if tip[0] is not None:
+                try:
+                    tip[0].destroy()
+                except Exception:
+                    pass
+                tip[0] = None
+
+        # Step 0: wait for user to focus Roblox
+        self.root.after(0, lambda: _create_tip('Focus Roblox, then click [ESC cancel]'))
+        self.root.after(0, _update_tip_pos)
+        pos = self._wait_for_click_or_esc()
+        if pos is None:
+            self.root.after(0, _destroy_tip)
+            print("[AUTO-SELL] Setup cancelled.")
+            return
+
+        # Press T to open stash
+        self.root.after(0, lambda: _set_tip_text('Opening stash...'))
+        self._press_game_key('t')
+        time.sleep(2.0)
+
+        # Capture each button click
+        for key, label_text in steps:
+            self.root.after(0, lambda t=label_text: _set_tip_text(t + '  [ESC cancel]'))
+            time.sleep(0.3)
+            pos = self._wait_for_click_or_esc()
+            if pos is None:
+                self.root.after(0, _destroy_tip)
+                print("[AUTO-SELL] Setup cancelled.")
+                return
+            positions[key] = pos
+            print(f"[AUTO-SELL] Captured {key}: {pos}")
+
+        self.root.after(0, _destroy_tip)
+        self.auto_sell_positions = positions
+        self._save_auto_sell()
+        self.root.after(0, self._draw_auto_sell_overlays)
+        print("[AUTO-SELL] Setup complete.")
+
+    def _draw_auto_sell_overlays(self):
+        """Draw small overlay circles at each saved position."""
+        self._clear_auto_sell_overlays()
+        if not self.auto_sell_positions:
+            return
+
+        TRANS = '#010101'
+        labels = {
+            'sell_items': 'Sell',
+            'select_all': 'SelAll',
+            'accept': 'Accept',
+            'yes': 'Yes',
+            'close': 'Close',
+        }
+        for key, (x, y) in self.auto_sell_positions.items():
+            win = tk.Toplevel(self.root)
+            win.overrideredirect(True)
+            win.attributes('-topmost', True)
+            win.attributes('-transparentcolor', TRANS)
+            win.configure(bg=TRANS)
+
+            size = 40
+            cvs = tk.Canvas(win, width=size, height=size + 14,
+                            bg=TRANS, highlightthickness=0)
+            cvs.pack()
+            # Circle
+            cvs.create_oval(4, 4, size - 4, size - 4,
+                            outline='#ff79c6', width=2, fill='')
+            # Label
+            lbl_text = labels.get(key, key)
+            cvs.create_text(size // 2, size + 6,
+                            text=lbl_text, font=('Consolas', 8, 'bold'),
+                            fill='#ff79c6')
+
+            win.geometry(f"{size}x{size + 14}+{x - size // 2}+{y - size // 2}")
+            self._auto_sell_overlays.append(win)
+
+    def _clear_auto_sell_overlays(self):
+        for win in self._auto_sell_overlays:
+            try:
+                win.destroy()
+            except Exception:
+                pass
+        self._auto_sell_overlays = []
+
+    def _click_at_screen(self, x, y):
+        """Click at an absolute screen position."""
+        abs_x = int((x - self._virt_left) * 65535 / (self._virt_w - 1))
+        abs_y = int((y - self._virt_top) * 65535 / (self._virt_h - 1))
+        # Move to position
+        self._send_mouse(0x8000 | 0x4000 | 0x0001, abs_x, abs_y)
+        time.sleep(0.05)
+        # Click down
+        self._send_mouse(0x8000 | 0x4000 | 0x0002, abs_x, abs_y)
+        time.sleep(0.03)
+        # Click up
+        self._send_mouse(0x8000 | 0x4000 | 0x0004, abs_x, abs_y)
+
+    def _execute_auto_sell(self):
+        """Perform the sell sequence: T -> Sell Items -> Select All -> Accept -> Yes -> Close."""
+        self._auto_sell_executing = True
+        try:
+            steps = [
+                ('t_key', None),
+                ('click', 'sell_items'),
+                ('click', 'select_all'),
+                ('click', 'accept'),
+                ('click', 'yes'),
+                ('click', 'close'),
+            ]
+            for step_type, target in steps:
+                if self._auto_sell_stop or not self.auto_sell_active:
+                    return
+                if step_type == 't_key':
+                    self._press_game_key('t')
+                else:
+                    pos = self.auto_sell_positions.get(target)
+                    if pos:
+                        self._click_at_screen(pos[0], pos[1])
+                # 4 second gap between each step
+                deadline = time.time() + 4.0
+                while time.time() < deadline:
+                    if self._auto_sell_stop or not self.auto_sell_active or not self.running:
+                        return
+                    time.sleep(0.05)
+        finally:
+            self._auto_sell_executing = False
+
+    def _auto_sell_loop(self):
+        """Background loop that repeats the sell sequence on a timer."""
+        while self.running:
+            if not self.auto_sell_active or not self._roblox_focused():
+                time.sleep(0.1)
+                continue
+            if not self.auto_sell_positions:
+                time.sleep(0.1)
+                continue
+
+            self._execute_auto_sell()
+
+            # Wait for interval
+            deadline = time.time() + self.auto_sell_interval
+            while time.time() < deadline:
+                if self._auto_sell_stop or not self.auto_sell_active or not self.running:
+                    break
+                time.sleep(0.1)
 
     # ---------------------------------------------- Periodic Attack (autoclick sub-feature)
     def toggle_periodic_attack(self):
@@ -1720,6 +2025,49 @@ class LenkTools:
                              lambda e, n=hotkey_name: self._start_key_rebind(n))
             self._hotkey_ui[hotkey_name] = {'type': 'label', 'widget': hint_widget}
 
+        # ---- Auto Sell sub-section ----
+        as_frame = tk.Frame(self.root, bg=BG)
+        as_frame.pack(fill='x', padx=20, pady=(6, 0))
+
+        as_toggle_row = tk.Frame(as_frame, bg=BG)
+        as_toggle_row.pack(fill='x', pady=2)
+        self._as_dot = tk.Label(as_toggle_row, text='\u25CF',
+                                font=('Segoe UI', 8), fg='#ff5555', bg=BG)
+        self._as_dot.pack(side=tk.LEFT, padx=(0, 6))
+        self.as_lbl = tk.Label(as_toggle_row, text='Auto Sell: OFF',
+                               font=('Consolas', 10, 'bold'), fg=DIM, bg=BG,
+                               anchor='w')
+        self.as_lbl.pack(side=tk.LEFT, fill='x', expand=True)
+
+        tk.Button(as_toggle_row, text='Setup', font=('Consolas', 9, 'bold'),
+                  fg='#58a6ff', bg=BG2, activebackground='#30363d',
+                  activeforeground='#58a6ff', bd=0, relief='flat',
+                  cursor='hand2',
+                  command=lambda: Thread(target=self._auto_sell_setup,
+                                         daemon=True).start()
+                  ).pack(side=tk.RIGHT, padx=(4, 0))
+
+        for w in (self._as_dot, self.as_lbl, as_toggle_row):
+            w.bind('<Button-1>', lambda e: self._toggle_auto_sell())
+            w.config(cursor='hand2')
+
+        # Interval slider row
+        as_slider_row = tk.Frame(as_frame, bg=BG)
+        as_slider_row.pack(fill='x', pady=(2, 0), padx=(14, 0))
+
+        self._as_interval_lbl = tk.Label(
+            as_slider_row, text=self._fmt_interval(self.auto_sell_interval),
+            font=('Consolas', 9), fg='#8b949e', bg=BG, width=7, anchor='w')
+        self._as_interval_lbl.pack(side=tk.LEFT)
+
+        self._as_slider = tk.Scale(
+            as_slider_row, from_=30, to=1800, orient=tk.HORIZONTAL,
+            bg=BG, fg='#8b949e', troughcolor=BG2, highlightthickness=0,
+            bd=0, sliderrelief='flat', showvalue=False,
+            command=self._on_auto_sell_slider)
+        self._as_slider.set(self.auto_sell_interval)
+        self._as_slider.pack(side=tk.LEFT, fill='x', expand=True)
+
         # ---- Periodic Attack sub-section ----
         pa_frame = tk.Frame(self.root, bg=BG)
         pa_frame.pack(fill='x', padx=20, pady=(6, 0))
@@ -2113,6 +2461,13 @@ class LenkTools:
         else:
             self.pa_lbl.config(text='Periodic Attack: OFF', fg='#484f58')
             self._pa_dot.config(fg='#ff5555')
+
+        if self.auto_sell_active:
+            self.as_lbl.config(text='Auto Sell: ON', fg='#50fa7b')
+            self._as_dot.config(fg='#50fa7b')
+        else:
+            self.as_lbl.config(text='Auto Sell: OFF', fg='#484f58')
+            self._as_dot.config(fg='#ff5555')
 
         # ---- Mini mode labels ----
         self._refresh_mini()
