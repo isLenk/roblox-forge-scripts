@@ -127,6 +127,8 @@ if not errorlevel 1 (
     timeout /t 1 /nobreak >nul
     goto wait
 )
+rem Give Windows time to release file handles and clean up _MEI temp dir
+timeout /t 3 /nobreak >nul
 if exist "{old_path}" del /f "{old_path}"
 start "" "{current_exe}"
 del "%~f0"
