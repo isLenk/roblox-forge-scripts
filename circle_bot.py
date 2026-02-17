@@ -1366,7 +1366,7 @@ class LenkTools:
             padx=12, pady=4,
             command=self._toggle_hotkeys
         )
-        self.hotkey_btn.pack(pady=(0, 4))
+        self.hotkey_btn.pack(side=tk.LEFT, expand=True, padx=(8, 4))
 
         self.macro_btn = tk.Button(
             bottom_frame, text='\u2630 Macro Editor', font=('Consolas', 10, 'bold'),
@@ -1375,7 +1375,7 @@ class LenkTools:
             padx=12, pady=4,
             command=self._toggle_macro_panel
         )
-        self.macro_btn.pack()
+        self.macro_btn.pack(side=tk.LEFT, expand=True, padx=(4, 8))
 
         self.root.protocol("WM_DELETE_WINDOW", self._quit)
 
