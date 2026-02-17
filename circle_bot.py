@@ -233,6 +233,7 @@ class LenkTools:
         self._auto_sell_stop = False
         self._auto_sell_executing = False
         self._auto_sell_overlays = []
+        self.auto_sell_camlock = False
         self._load_auto_sell()
 
         # Auto-phase state (I -> O -> P, advances on GO screen)
@@ -978,6 +979,7 @@ class LenkTools:
                     k: tuple(v) for k, v in data.get('positions', {}).items()
                 }
                 self.auto_sell_interval = data.get('interval', 300)
+                self.auto_sell_camlock = data.get('camlock', False)
             except Exception:
                 self.auto_sell_positions = {}
         else:
@@ -988,6 +990,7 @@ class LenkTools:
             data = {
                 'positions': self.auto_sell_positions,
                 'interval': self.auto_sell_interval,
+                'camlock': self.auto_sell_camlock,
             }
             with open(self._auto_sell_save_path(), 'w') as f:
                 json.dump(data, f, indent=2)
@@ -1007,6 +1010,13 @@ class LenkTools:
         self.auto_sell_interval = int(val)
         self._as_interval_lbl.config(text=self._fmt_interval(self.auto_sell_interval))
         self._save_auto_sell()
+
+    def _toggle_auto_sell_camlock(self):
+        self.auto_sell_camlock = not self.auto_sell_camlock
+        color = '#50fa7b' if self.auto_sell_camlock else '#484f58'
+        self._as_camlock_btn.config(fg=color, activeforeground=color)
+        self._save_auto_sell()
+        print(f"[AUTO-SELL] Camlock {'ON' if self.auto_sell_camlock else 'OFF'}")
 
     def _toggle_auto_sell(self):
         if not self.auto_sell_positions:
@@ -1220,10 +1230,19 @@ class LenkTools:
         time.sleep(0.03)
         self._send_mouse(0x8000 | 0x4000 | 0x0004, abs_x, abs_y)
 
+    _SCAN_LCTRL = 0x1D  # scan code for Left Control
+
     def _execute_auto_sell(self):
         """Perform the sell sequence: T -> Sell Items -> Select All -> Accept -> Yes -> Close."""
         self._auto_sell_executing = True
         try:
+            # Unlock camera if camlock enabled
+            if self.auto_sell_camlock:
+                self._send_key(self._SCAN_LCTRL, key_up=False)
+                time.sleep(0.05)
+                self._send_key(self._SCAN_LCTRL, key_up=True)
+                time.sleep(0.3)
+
             steps = [
                 ('t_key', None),
                 ('click', 'sell_items'),
@@ -1248,6 +1267,11 @@ class LenkTools:
                         return
                     time.sleep(0.05)
         finally:
+            # Re-lock camera if camlock enabled
+            if self.auto_sell_camlock:
+                self._send_key(self._SCAN_LCTRL, key_up=False)
+                time.sleep(0.05)
+                self._send_key(self._SCAN_LCTRL, key_up=True)
             self._auto_sell_executing = False
 
     def _auto_sell_loop(self):
@@ -2059,6 +2083,14 @@ class LenkTools:
                   command=lambda: Thread(target=self._auto_sell_setup,
                                          daemon=True).start()
                   ).pack(side=tk.RIGHT, padx=(4, 0))
+
+        camlock_color = '#50fa7b' if self.auto_sell_camlock else DIM
+        self._as_camlock_btn = tk.Button(
+            as_toggle_row, text='Camlock', font=('Consolas', 9, 'bold'),
+            fg=camlock_color, bg=BG2, activebackground='#30363d',
+            activeforeground=camlock_color, bd=0, relief='flat',
+            cursor='hand2', command=self._toggle_auto_sell_camlock)
+        self._as_camlock_btn.pack(side=tk.RIGHT, padx=(4, 0))
 
         for w in (self._as_dot, self.as_lbl, as_toggle_row):
             w.bind('<Button-1>', lambda e: self._toggle_auto_sell())
