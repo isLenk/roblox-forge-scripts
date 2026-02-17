@@ -1436,6 +1436,20 @@ class LenkTools:
         min_btn.bind('<Enter>', lambda e: min_btn.config(fg='#c9d1d9', bg='#161b22'))
         min_btn.bind('<Leave>', lambda e: min_btn.config(fg=DIM, bg=BG))
 
+        # Update button (beside title)
+        self._update_btn = tk.Label(
+            titlebar, text='\u21BB', font=('Segoe UI', 11),
+            fg=DIM, bg=BG, padx=4, cursor='hand2')
+        self._update_btn.pack(side=tk.LEFT)
+        self._update_btn.bind('<Button-1>', lambda e: self._run_in_app_update())
+        self._update_btn.bind('<Enter>',
+            lambda e: self._update_btn.config(fg='#58a6ff', bg='#161b22'))
+        self._update_btn.bind('<Leave>',
+            lambda e: self._update_btn.config(
+                fg=self._update_btn._rest_fg if hasattr(self._update_btn, '_rest_fg') else DIM,
+                bg=BG))
+        self._update_btn._rest_fg = DIM
+
         # Dragging
         def _start_drag(event):
             self._drag_x = event.x
@@ -3144,6 +3158,79 @@ class LenkTools:
         except Exception as e:
             print(f"[MACRO] Hotkey error: {e}")
         print(f"[MACRO] Record hotkey changed to '{new_key}'")
+
+    # --------------------------------------------------------- Check update
+    def _run_in_app_update(self):
+        """Check for updates from within the running app."""
+        from updater import check_for_update, apply_update, restart, _UpdateWindow
+
+        btn = self._update_btn
+        btn.config(text='\u231B', fg='#f0c040')  # hourglass
+        btn._rest_fg = '#f0c040'
+        btn.unbind('<Button-1>')  # prevent double-clicks
+        self.root.update_idletasks()
+
+        def _do_check():
+            result = check_for_update()
+            self.root.after(0, lambda: _on_check_done(result))
+
+        def _on_check_done(result):
+            if result is None:
+                btn.config(text='\u2714', fg='#50fa7b')
+                btn._rest_fg = '#50fa7b'
+                print("[UPDATER] Already up to date.")
+                # Reset after 2s
+                self.root.after(2000, _reset_btn)
+                return
+
+            tag, url = result
+            btn.config(text='\u21BB', fg='#58a6ff')
+            btn._rest_fg = '#58a6ff'
+            print(f"[UPDATER] New version: {tag}, downloading...")
+
+            # Show the updater splash for download + apply
+            win = _UpdateWindow()
+            win.set_status(f"Updating to {tag}...", "Downloading new version")
+
+            def _do_apply():
+                ok = apply_update(url)
+                self.root.after(0, lambda: _on_apply_done(ok, tag, win))
+
+            Thread(target=_do_apply, daemon=True).start()
+            _pump_splash(win)
+
+        def _pump_splash(win):
+            """Keep splash responsive while download thread runs."""
+            try:
+                win.root.update()
+            except tk.TclError:
+                return
+            self.root.after(16, lambda: _pump_splash(win))
+
+        def _on_apply_done(ok, tag, win):
+            if ok:
+                win.set_done(f"Updated to {tag}")
+                win.set_status(f"Updated to {tag}", "Restarting...")
+                win.root.update()
+                import time
+                time.sleep(1)
+                win.close()
+                self._quit()
+                restart()
+            else:
+                win.set_error("Update failed")
+                win.root.update()
+                import time
+                time.sleep(2)
+                win.close()
+                _reset_btn()
+
+        def _reset_btn():
+            btn.config(text='\u21BB', fg='#484f58')
+            btn._rest_fg = '#484f58'
+            btn.bind('<Button-1>', lambda e: self._run_in_app_update())
+
+        Thread(target=_do_check, daemon=True).start()
 
     # ------------------------------------------------------------ Minimize
     def _minimize(self):
