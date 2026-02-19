@@ -14,9 +14,13 @@ import shutil
 import math
 import time
 import tkinter as tk
+from pathlib import Path
 from threading import Thread
 from urllib.request import urlopen, Request
 from urllib.error import URLError
+
+_ASSETS = (Path(sys._MEIPASS) if hasattr(sys, '_MEIPASS')
+           else Path(__file__).resolve().parent) / 'assets'
 
 from version import VERSION
 
@@ -107,38 +111,52 @@ def restart():
     """Restart via a helper batch script that waits for this process to exit first.
 
     This prevents two PyInstaller --onefile processes from running at the same
-    time, which causes base_library.zip extraction conflicts.
+    time, which causes base_library.zip extraction conflicts and Python DLL
+    load failures.
     """
     current_exe = sys.executable
     old_path = current_exe + ".old"
     pid = os.getpid()
+    mei_dir = getattr(sys, '_MEIPASS', '')
 
-    # Write a temporary batch script that:
-    # 1. Waits for our PID to disappear
-    # 2. Cleans up the .old exe
-    # 3. Launches the new exe
-    # 4. Deletes itself
     bat_fd, bat_path = tempfile.mkstemp(suffix=".bat")
     with os.fdopen(bat_fd, "w") as f:
-        f.write(f"""@echo off
+        script = f"""@echo off
+setlocal enabledelayedexpansion
 :wait
 tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul
 if not errorlevel 1 (
     timeout /t 1 /nobreak >nul
     goto wait
 )
-rem Give Windows time to release file handles and clean up _MEI temp dir
-timeout /t 3 /nobreak >nul
-if exist "{old_path}" del /f "{old_path}"
+timeout /t 2 /nobreak >nul
+"""
+        if mei_dir:
+            script += f"""rem Wait for old PyInstaller extraction dir to be fully released
+set "_tries=0"
+:cleanmei
+if not exist "{mei_dir}" goto doneClean
+rmdir /s /q "{mei_dir}" 2>nul
+set /a "_tries+=1"
+if !_tries! GEQ 15 goto doneClean
+timeout /t 1 /nobreak >nul
+goto cleanmei
+:doneClean
+"""
+        script += f"""if exist "{old_path}" del /f "{old_path}"
 start "" "{current_exe}"
 del "%~f0"
-""")
+"""
+        f.write(script)
 
     subprocess.Popen(
         ["cmd.exe", "/c", bat_path],
         creationflags=0x08000000,  # CREATE_NO_WINDOW
     )
-    sys.exit(0)
+    # Use os._exit to terminate immediately without Python/PyInstaller cleanup.
+    # The batch script handles _MEI cleanup instead, which is more reliable
+    # than racing between PyInstaller's atexit handler and the new process.
+    os._exit(0)
 
 
 # ------------------------------------------------------------------ GUI
@@ -168,10 +186,29 @@ class _UpdateWindow:
         y = (sy - H) // 2
         self.root.geometry(f"{W}x{H}+{x}+{y}")
 
-        # Title
-        tk.Label(self.root, text=f"LENK.TOOLS  v{VERSION}",
-                 font=('Consolas', 10, 'bold'), fg=self.DIM,
-                 bg=self.BG).pack(pady=(12, 0))
+        # Logo / title
+        _logo_file = _ASSETS / 'logo.png'
+        self._logo_photo = None
+        if _logo_file.exists():
+            try:
+                from PIL import Image, ImageEnhance, ImageTk
+                _limg = Image.open(str(_logo_file))
+                lh = 18
+                lw = round(_limg.width * lh / _limg.height)
+                _limg = _limg.resize((lw, lh), Image.LANCZOS)
+                _limg = ImageEnhance.Brightness(_limg).enhance(0.45)
+                self._logo_photo = ImageTk.PhotoImage(_limg)
+                tk.Label(self.root, image=self._logo_photo,
+                         bg=self.BG, bd=0).pack(pady=(14, 0))
+            except Exception:
+                self._logo_photo = None
+        if self._logo_photo is None:
+            tk.Label(self.root, text="LENK.TOOLS",
+                     font=('Consolas', 10, 'bold'), fg=self.DIM,
+                     bg=self.BG).pack(pady=(14, 0))
+        tk.Label(self.root, text=f"v{VERSION}",
+                 font=('Consolas', 8), fg=self.DIM,
+                 bg=self.BG).pack(pady=(2, 0))
 
         # Spinner canvas
         self._spinner_size = 36

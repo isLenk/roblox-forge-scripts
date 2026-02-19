@@ -1,12 +1,13 @@
 """
 Wiki Feature
 =============
-Gemini-powered wiki data extraction from Roblox Forge wiki pages.
+Wiki data extraction from Roblox Forge wiki Fandom pages.
 Caches structured data locally in wiki.json and provides search.
 """
 
 import json
 import os
+import re
 import tkinter as tk
 from tkinter import ttk, simpledialog, messagebox
 from threading import Thread
@@ -46,7 +47,7 @@ def load_wiki_data():
                 return json.load(f)
         except Exception:
             pass
-    return {"gemini_api_key": "", "entries": dict(DEFAULT_ENTRIES)}
+    return {"entries": dict(DEFAULT_ENTRIES)}
 
 
 def save_wiki_data(data):
@@ -58,22 +59,58 @@ def save_wiki_data(data):
         print(f"[WIKI] Save error: {e}")
 
 
-_EXTRACT_PROMPT = (
-    "Extract ALL tabular/structured data into a JSON array of objects. "
-    "Each object is one row. Use the table headers as keys. "
-    "Include data from ALL tables/tabs/sections. "
-    "Combine all rows into one flat JSON array. "
-    "Return ONLY valid JSON, no markdown fences."
-)
+def _clean_html(cell_html):
+    """Strip HTML tags and collapse whitespace."""
+    return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', cell_html)).strip()
+
+
+def _parse_single_table(table_html):
+    """Parse a single <table> HTML string into a list of row dicts."""
+    tr_list = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL | re.IGNORECASE)
+    if not tr_list:
+        return []
+
+    # First row with <th> cells is the header
+    headers = None
+    data_start = 0
+    for i, tr in enumerate(tr_list):
+        th_cells = re.findall(r'<th[^>]*>(.*?)</th>', tr, re.DOTALL | re.IGNORECASE)
+        if th_cells:
+            headers = [_clean_html(c) for c in th_cells]
+            data_start = i + 1
+            break
+
+    if not headers:
+        first_cells = re.findall(r'<td[^>]*>(.*?)</td>', tr_list[0], re.DOTALL | re.IGNORECASE)
+        if first_cells:
+            headers = [_clean_html(c) for c in first_cells]
+            data_start = 1
+        else:
+            return []
+
+    rows = []
+    for tr in tr_list[data_start:]:
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', tr, re.DOTALL | re.IGNORECASE)
+        if not cells:
+            continue
+        row = {}
+        for j, h in enumerate(headers):
+            if j < len(cells):
+                val = _clean_html(cells[j])
+                if h and val:
+                    row[h] = val
+        if row:
+            rows.append(row)
+    return rows
 
 
 def _parse_fandom_tables(url):
-    """For Fandom wiki URLs, fetch and parse ALL tables into list-of-dicts.
+    """For Fandom wiki URLs, fetch and parse tables grouped by tab labels.
 
     Uses the MediaWiki API which returns full HTML including hidden tab content.
-    Returns list of dicts, or None for non-Fandom URLs / on failure.
+    Extracts tab structure (wds-tabber) to label each table by its tab name.
+    Returns list of {"name": str, "rows": list[dict]}, or None on failure.
     """
-    import re
     m = re.match(r'https?://([^/]+\.fandom\.com)/wiki/(.+)', url)
     if not m:
         return None
@@ -94,204 +131,101 @@ def _parse_fandom_tables(url):
         print(f"[WIKI] Fandom API fetch failed: {e}")
         return None
 
-    def _clean(cell_html):
-        return re.sub(r'\s+', ' ', re.sub(r'<[^>]+>', '', cell_html)).strip()
+    # Collect positioned tokens from the HTML for structure analysis
+    tokens = []
+    for m2 in re.finditer(r'<h2[^>]*>(.*?)</h2>', html, re.DOTALL | re.IGNORECASE):
+        tokens.append(('heading', m2.start(), _clean_html(m2.group(1))))
+    for m2 in re.finditer(r'<div[^>]*class="[^"]*tabber wds-tabber[^"]*"', html):
+        tokens.append(('tabber_open', m2.start(), None))
+    for m2 in re.finditer(r'data-hash="([^"]+)"', html):
+        tokens.append(('tab_label', m2.start(), m2.group(1).replace('_', ' ')))
+    for m2 in re.finditer(r'<div[^>]*class="[^"]*wds-tab__content[^"]*"', html):
+        tokens.append(('tab_content', m2.start(), None))
+    for m2 in re.finditer(r'<table[^>]*>.*?</table>', html, re.DOTALL | re.IGNORECASE):
+        tokens.append(('table', m2.start(), m2.group(0)))
+    tokens.sort(key=lambda t: t[1])
 
-    tables = re.findall(r'<table[^>]*>.*?</table>', html, re.DOTALL | re.IGNORECASE)
-    if not tables:
-        return None
+    # Walk tokens with a tabber stack to assign labels to tables
+    tabber_stack = []  # each entry: {'labels': [...], 'idx': 0}
+    current_heading = ''
+    current_label = ''
+    result = []
 
-    all_rows = []
-    for t in tables:
-        tr_list = re.findall(r'<tr[^>]*>(.*?)</tr>', t, re.DOTALL | re.IGNORECASE)
-        if not tr_list:
-            continue
-
-        # First row with <th> cells is the header
-        headers = None
-        data_start = 0
-        for i, tr in enumerate(tr_list):
-            th_cells = re.findall(r'<th[^>]*>(.*?)</th>', tr, re.DOTALL | re.IGNORECASE)
-            if th_cells:
-                headers = [_clean(c) for c in th_cells]
-                data_start = i + 1
-                break
-
-        if not headers:
-            # No headers found — try using first row as headers
-            first_cells = re.findall(r'<td[^>]*>(.*?)</td>', tr_list[0], re.DOTALL | re.IGNORECASE)
-            if first_cells:
-                headers = [_clean(c) for c in first_cells]
-                data_start = 1
+    for token_type, _pos, value in tokens:
+        if token_type == 'heading':
+            current_heading = value
+        elif token_type == 'tabber_open':
+            tabber_stack.append({'labels': [], 'idx': 0})
+        elif token_type == 'tab_label':
+            if tabber_stack:
+                tabber_stack[-1]['labels'].append(value)
+        elif token_type == 'tab_content':
+            # Pop exhausted tabbers to find the active one
+            while (tabber_stack and
+                   tabber_stack[-1]['idx'] >= len(tabber_stack[-1]['labels'])):
+                tabber_stack.pop()
+            if tabber_stack:
+                tabber = tabber_stack[-1]
+                current_label = tabber['labels'][tabber['idx']]
+                tabber['idx'] += 1
             else:
-                continue
+                current_label = ''
+        elif token_type == 'table':
+            rows = _parse_single_table(value)
+            if rows:
+                label = current_label or current_heading or f'Table {len(result) + 1}'
+                result.append({
+                    'name': label,
+                    '_section': current_heading,
+                    'rows': rows,
+                })
 
-        # Filter out empty headers (like Image columns)
-        for i, tr in enumerate(tr_list[data_start:]):
-            cells = re.findall(r'<td[^>]*>(.*?)</td>', tr, re.DOTALL | re.IGNORECASE)
-            if not cells:
-                continue
-            row = {}
-            for j, h in enumerate(headers):
-                if j < len(cells):
-                    val = _clean(cells[j])
-                    if h and val:  # skip empty header or empty value
-                        row[h] = val
-            if row:
-                all_rows.append(row)
+    # Post-process: disambiguate duplicate names across sections
+    label_sections = {}
+    for table in result:
+        name = table['name']
+        section = table.get('_section', '')
+        if name not in label_sections:
+            label_sections[name] = set()
+        label_sections[name].add(section)
 
-    print(f"[WIKI] Parsed {len(all_rows)} rows from {len(tables)} tables")
-    return all_rows if all_rows else None
+    for table in result:
+        name = table['name']
+        section = table.pop('_section', '')
+        if len(label_sections.get(name, set())) > 1 and section:
+            table['name'] = f'{section}: {name}'
 
-
-def _strip_markdown_fences(text):
-    """Remove ```json ... ``` wrappers from LLM output."""
-    text = text.strip()
-    if text.startswith('```'):
-        first_nl = text.index('\n')
-        text = text[first_nl + 1:]
-    if text.endswith('```'):
-        text = text[:-3]
-    return text.strip()
-
-
-def _llm_request_with_retry(req_builder, label):
-    """Fire an HTTP request with retry on 429. req_builder() returns a new Request."""
-    import time as _time
-    for attempt in range(4):
-        try:
-            req = req_builder()
-            print(f"[WIKI] {label} request -> {req.full_url[:80]}  (attempt {attempt + 1}, body {len(req.data)} bytes)")
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                raw = resp.read().decode('utf-8')
-                print(f"[WIKI] {label} response: {resp.status} ({len(raw)} bytes)")
-                return json.loads(raw)
-        except urllib.error.HTTPError as e:
-            body = ''
-            try:
-                body = e.read().decode('utf-8', errors='replace')[:500]
-            except Exception:
-                pass
-            print(f"[WIKI] {label} HTTP {e.code}: {e.reason}\n{body}")
-            if e.code == 429 and attempt < 3:
-                wait = (attempt + 1) * 10
-                print(f"[WIKI] {label} retrying in {wait}s...")
-                _time.sleep(wait)
-            else:
-                raise
-        except Exception as e:
-            print(f"[WIKI] {label} error: {type(e).__name__}: {e}")
-            raise
+    total_rows = sum(len(t['rows']) for t in result)
+    print(f"[WIKI] Parsed {total_rows} rows across {len(result)} tables")
+    return result if result else None
 
 
-def _extract_gemini(api_key, url):
-    """Call Gemini API with URL context — Gemini fetches the page itself."""
-    endpoint = (
-        f"https://generativelanguage.googleapis.com/v1beta/models/"
-        f"gemini-2.0-flash:generateContent?key={api_key}"
-    )
-    body = json.dumps({
-        "contents": [{"parts": [{"text": f"{_EXTRACT_PROMPT}\n\nURL: {url}"}]}],
-        "tools": [{"url_context": {}}],
-        "generationConfig": {"maxOutputTokens": 65536},
-    }).encode('utf-8')
-
-    def build_req():
-        return urllib.request.Request(
-            endpoint, data=body,
-            headers={'Content-Type': 'application/json'}, method='POST')
-
-    result = _llm_request_with_retry(build_req, 'Gemini')
-    print(f"[WIKI] Gemini raw response:\n{json.dumps(result, indent=2)[:3000]}")
-    try:
-        text = result['candidates'][0]['content']['parts'][0]['text']
-    except (KeyError, IndexError) as e:
-        print(f"[WIKI] Unexpected response structure: {e}")
-        raise ValueError(f"Gemini returned unexpected response: {json.dumps(result)[:500]}")
-    print(f"[WIKI] Gemini text output:\n{text[:2000]}")
-    return _strip_markdown_fences(text)
-
-
-def _extract_openai(api_key, url):
-    """Call OpenAI Responses API with web search — model fetches the page itself."""
-    endpoint = "https://api.openai.com/v1/responses"
-    body = json.dumps({
-        "model": "gpt-4o-mini",
-        "input": f"{_EXTRACT_PROMPT}\n\nURL: {url}",
-        "tools": [{"type": "web_search_preview"}],
-        "max_output_tokens": 16384,
-    }).encode('utf-8')
-
-    def build_req():
-        return urllib.request.Request(
-            endpoint, data=body,
-            headers={
-                'Content-Type': 'application/json',
-                'Authorization': f'Bearer {api_key}',
-            }, method='POST')
-
-    result = _llm_request_with_retry(build_req, 'OpenAI')
-    print(f"[WIKI] OpenAI raw response:\n{json.dumps(result, indent=2)[:3000]}")
-    # Extract text from the response output items
-    try:
-        text = ''
-        for item in result.get('output', []):
-            if item.get('type') == 'message':
-                for content in item.get('content', []):
-                    if content.get('type') == 'output_text':
-                        text = content['text']
-                        break
-                if text:
-                    break
-        if not text:
-            raise KeyError('No output_text found')
-    except (KeyError, IndexError) as e:
-        print(f"[WIKI] Unexpected response structure: {e}")
-        raise ValueError(f"OpenAI returned unexpected response: {json.dumps(result)[:500]}")
-    print(f"[WIKI] OpenAI text output:\n{text[:2000]}")
-    return _strip_markdown_fences(text)
-
-
-def _parse_truncated_json(text):
-    """Try to parse JSON, recovering partial arrays if truncated."""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        pass
-    # Try to salvage a truncated JSON array by closing it
-    # Find the last complete object (ends with })
-    last_brace = text.rfind('}')
-    if last_brace > 0:
-        truncated = text[:last_brace + 1].rstrip().rstrip(',') + ']'
-        try:
-            result = json.loads(truncated)
-            print(f"[WIKI] Recovered truncated JSON ({len(result)} rows)")
-            return result
-        except json.JSONDecodeError:
-            pass
-    raise json.JSONDecodeError("Could not parse or recover JSON", text, 0)
-
-
-def extract_with_llm(provider, api_key, url):
+def extract_wiki_data(url):
     """Extract structured data from a wiki URL.
 
-    For Fandom wikis: parses HTML tables directly (instant, no API key needed).
-    For other URLs: falls back to LLM with web search.
+    For Fandom wikis: parses HTML tables directly, grouped by tab labels.
+    Returns list of {"name": str, "rows": list[dict]}.
     """
-    # Try direct HTML parsing first (Fandom wikis)
-    rows = _parse_fandom_tables(url)
-    if rows:
-        print(f"[WIKI] Direct parse succeeded — {len(rows)} rows, no LLM needed")
-        return rows
+    tables = _parse_fandom_tables(url)
+    if tables:
+        return tables
+    print(f"[WIKI] No tables found for: {url}")
+    return None
 
-    # Fallback: LLM with web search
-    print(f"[WIKI] Falling back to {provider} LLM for: {url}")
-    if provider == 'openai':
-        text = _extract_openai(api_key, url)
-    else:
-        text = _extract_gemini(api_key, url)
 
-    return _parse_truncated_json(text)
+def _normalize_entry_data(data):
+    """Convert flat row list (old format) to table groups (new format).
+
+    Old format: [{"Ore": "Coal", ...}, ...]
+    New format: [{"name": "All", "rows": [{"Ore": "Coal", ...}, ...]}, ...]
+    """
+    if not data:
+        return data
+    if isinstance(data, list) and data:
+        if isinstance(data[0], dict) and 'name' in data[0] and 'rows' in data[0]:
+            return data  # already new format
+        return [{"name": "All", "rows": data}]  # wrap old format
+    return data
 
 
 def search_all_entries(data, query):
@@ -303,15 +237,21 @@ def search_all_entries(data, query):
         return []
     q = query.lower()
     results = []
+    seen = set()
     for name, entry in data.get('entries', {}).items():
-        rows = entry.get('data')
-        if not rows:
+        tables = _normalize_entry_data(entry.get('data'))
+        if not tables:
             continue
-        for row in rows:
-            for field, value in row.items():
-                if q in str(value).lower():
-                    results.append((name, row, field, str(value)))
-                    break  # one match per row is enough
+        for table in tables:
+            for row in table.get('rows', []):
+                for field, value in row.items():
+                    if q in str(value).lower():
+                        # Deduplicate by row content so the same entry shows only once
+                        row_key = tuple(sorted(row.items()))
+                        if row_key not in seen:
+                            seen.add(row_key)
+                            results.append((name, row, field, str(value)))
+                        break  # one match per row is enough
     return results
 
 
@@ -430,37 +370,6 @@ class WikiWindow:
         add_btn.bind('<Enter>', lambda e: add_btn.config(fg=ACCENT))
         add_btn.bind('<Leave>', lambda e: add_btn.config(fg=DIM))
 
-        # Provider + API key section
-        provider_frame = tk.Frame(left, bg=BORDER)
-        provider_frame.pack(fill='x', padx=4, pady=(0, 2))
-
-        self._provider = self.data.get('provider', 'gemini')
-        self._provider_btn = tk.Label(
-            provider_frame,
-            text=self._provider.upper(),
-            font=('Consolas', 8, 'bold'),
-            fg=GREEN if self._provider == 'gemini' else '#f0c040',
-            bg=BG2, padx=4, pady=2, cursor='hand2')
-        self._provider_btn.pack(side=tk.LEFT, padx=(2, 2), pady=2)
-        self._provider_btn.bind('<Button-1>', lambda e: self._cycle_provider())
-
-        tk.Label(provider_frame, text='\u25C0\u25B6', font=('Consolas', 7),
-                 fg=DIM, bg=BORDER).pack(side=tk.LEFT)
-
-        key_frame = tk.Frame(left, bg=BORDER)
-        key_frame.pack(fill='x', padx=4, pady=(0, 4))
-        tk.Label(key_frame, text='Key:', font=('Consolas', 8),
-                 fg=DIM, bg=BORDER).pack(side=tk.LEFT, padx=(4, 2))
-
-        self._api_key_var = tk.StringVar(
-            value=self.data.get(f'{self._provider}_api_key', ''))
-        api_entry = tk.Entry(
-            key_frame, textvariable=self._api_key_var, show='*',
-            font=('Consolas', 9), fg=ACCENT, bg=BG2,
-            insertbackground=ACCENT, bd=0, relief='flat', width=14)
-        api_entry.pack(side=tk.LEFT, fill='x', expand=True, padx=2, pady=2)
-        self._api_key_var.trace_add('write', self._on_api_key_changed)
-
         # Right panel
         right = tk.Frame(body, bg=BG)
         right.pack(side=tk.LEFT, fill='both', expand=True)
@@ -500,11 +409,11 @@ class WikiWindow:
             right, text='', font=('Consolas', 9), fg=DIM, bg=BG, anchor='w')
         self._status_lbl.pack(fill='x')
 
-        # Data table
+        # Data table area — notebook with tabs
         table_frame = tk.Frame(right, bg=BG)
         table_frame.pack(fill='both', expand=True)
 
-        # Style for treeview
+        # Style for treeview and notebook
         style = ttk.Style(panel)
         style.theme_use('clam')
         ROW_ALT = '#131921'
@@ -533,27 +442,19 @@ class WikiWindow:
                          borderwidth=0, arrowsize=0, width=10)
         style.map("Wiki.Horizontal.TScrollbar",
                   background=[('active', '#30363d'), ('!active', BORDER)])
+        # Notebook tab styling
+        style.configure("Wiki.TNotebook",
+                         background=BG, borderwidth=0)
+        style.configure("Wiki.TNotebook.Tab",
+                         background=BORDER, foreground=DIM,
+                         font=('Consolas', 8), padding=(8, 3))
+        style.map("Wiki.TNotebook.Tab",
+                  background=[('selected', BG2)],
+                  foreground=[('selected', ACCENT)])
 
-        self._tree = ttk.Treeview(
-            table_frame, columns=('placeholder',), show='headings',
-            style='Wiki.Treeview', height=12, selectmode='browse')
-        self._tree.heading('placeholder', text='Data')
-        self._tree.column('placeholder', width=400)
         self._row_alt_color = ROW_ALT
-        self._tree.tag_configure('oddrow', background=ROW_ALT)
-        self._tree.tag_configure('evenrow', background=BG2)
-
-        y_scroll = ttk.Scrollbar(table_frame, orient='vertical',
-                                  command=self._tree.yview,
-                                  style='Wiki.Vertical.TScrollbar')
-        x_scroll = ttk.Scrollbar(table_frame, orient='horizontal',
-                                  command=self._tree.xview,
-                                  style='Wiki.Horizontal.TScrollbar')
-        self._tree.configure(yscrollcommand=y_scroll.set,
-                              xscrollcommand=x_scroll.set)
-        x_scroll.pack(side=tk.BOTTOM, fill='x')
-        self._tree.pack(side=tk.LEFT, fill='both', expand=True)
-        y_scroll.pack(side=tk.RIGHT, fill='y')
+        self._notebook = ttk.Notebook(table_frame, style='Wiki.TNotebook')
+        self._notebook.pack(fill='both', expand=True)
 
         self._selected_entry = None
         self._refresh_entry_list()
@@ -592,8 +493,6 @@ class WikiWindow:
 
     # ---- Save ----
     def _save(self):
-        self.data['provider'] = self._provider
-        self.data[f'{self._provider}_api_key'] = self._api_key_var.get()
         save_wiki_data(self.data)
 
     # ---- Search placeholder ----
@@ -612,7 +511,7 @@ class WikiWindow:
         query = self._search_var.get()
         if query == 'Search all entries...' or not query:
             self._refresh_entry_list()
-            self._clear_table()
+            self._clear_tables()
             self._status_lbl.config(text='', fg=DIM)
             return
 
@@ -624,7 +523,7 @@ class WikiWindow:
                         if q in n.lower()]
 
         if not results and not name_matches:
-            self._clear_table()
+            self._clear_tables()
             self._status_lbl.config(text='No results found', fg=RED)
             return
 
@@ -635,40 +534,34 @@ class WikiWindow:
         for name in matched_names:
             self._entry_listbox.insert(tk.END, name)
 
-        # Show matched rows in the table
+        # Group matched rows by column structure so different schemas get separate tabs
         matched_rows = [r[1] for r in results]
         if matched_rows:
-            self._populate_table(matched_rows)
+            groups = {}
+            for row in matched_rows:
+                col_key = tuple(row.keys())
+                groups.setdefault(col_key, []).append(row)
+            if len(groups) == 1:
+                self._populate_table(matched_rows)
+            else:
+                tables = []
+                for i, rows in enumerate(groups.values(), 1):
+                    tables.append({'name': f'Results {i}', 'rows': rows})
+                self._populate_tables(tables)
             self._status_lbl.config(
                 text=f'{len(matched_rows)} matching row(s)', fg=GREEN)
         elif name_matches:
             # Name matched but no row-level match — show first matched entry's data
             entry = self.data['entries'].get(name_matches[0])
             if entry and entry.get('data'):
-                self._populate_table(entry['data'])
+                tables = _normalize_entry_data(entry['data'])
+                self._populate_tables(tables)
                 self._status_lbl.config(
                     text=f'Showing "{name_matches[0]}"', fg=ACCENT)
             else:
-                self._clear_table()
+                self._clear_tables()
                 self._status_lbl.config(
                     text=f'Entry "{name_matches[0]}" (no data)', fg=DIM)
-
-    # ---- Provider toggle ----
-    def _cycle_provider(self):
-        # Save current key before switching
-        self.data[f'{self._provider}_api_key'] = self._api_key_var.get()
-        self._provider = 'openai' if self._provider == 'gemini' else 'gemini'
-        self.data['provider'] = self._provider
-        # Update button label + color
-        self._provider_btn.config(
-            text=self._provider.upper(),
-            fg=GREEN if self._provider == 'gemini' else '#f0c040')
-        # Load the other provider's key
-        self._api_key_var.set(self.data.get(f'{self._provider}_api_key', ''))
-
-    # ---- API key changed ----
-    def _on_api_key_changed(self, *_):
-        self.data[f'{self._provider}_api_key'] = self._api_key_var.get()
 
     # ---- Entry list ----
     def _refresh_entry_list(self):
@@ -691,52 +584,89 @@ class WikiWindow:
         self._url_var.set(entry.get('url', ''))
         self._url_entry.config(state='readonly')
 
-        rows = entry.get('data')
-        if rows:
-            self._populate_table(rows)
+        tables = _normalize_entry_data(entry.get('data'))
+        if tables:
+            self._populate_tables(tables)
+            total_rows = sum(len(t.get('rows', [])) for t in tables)
             ts = entry.get('extracted_at', '')
             self._status_lbl.config(
-                text=f'{len(rows)} row(s)  |  Extracted: {ts}', fg=DIM)
+                text=f'{total_rows} row(s) in {len(tables)} table(s)  |  Extracted: {ts}',
+                fg=DIM)
         else:
-            self._clear_table()
+            self._clear_tables()
             self._status_lbl.config(
                 text='No data yet \u2014 click Regen to extract', fg=DIM)
 
-    # ---- Table ----
-    def _populate_table(self, rows):
-        """Populate the treeview with a list of row dicts."""
-        # Clear existing
-        for item in self._tree.get_children():
-            self._tree.delete(item)
+    # ---- Table display ----
+    def _clear_tables(self):
+        """Remove all tabs from the notebook."""
+        for tab_id in self._notebook.tabs():
+            self._notebook.forget(tab_id)
+
+    def _add_table_tab(self, name, rows):
+        """Add a tab to the notebook with a populated treeview."""
+        tab_frame = tk.Frame(self._notebook, bg=BG)
 
         if not rows:
+            tk.Label(tab_frame, text='No data', font=('Consolas', 10),
+                     fg=DIM, bg=BG).pack(expand=True)
+            self._notebook.add(tab_frame, text=name)
             return
 
-        # Build columns from the first row's keys (skip empty-only columns like Image)
+        # Build columns from the first row's keys (skip empty-only columns)
         all_cols = list(rows[0].keys())
         cols = [c for c in all_cols
                 if any(str(row.get(c, '')).strip() for row in rows[:20])]
         if not cols:
             cols = all_cols
-        self._tree['columns'] = cols
+
+        tree = ttk.Treeview(
+            tab_frame, columns=cols, show='headings',
+            style='Wiki.Treeview', selectmode='browse')
+
         for col in cols:
-            self._tree.heading(col, text=col)
-            # Auto-size: use max of header length and first few values
+            tree.heading(col, text=col)
             max_w = len(col) * 9
             for row in rows[:20]:
                 val_w = len(str(row.get(col, ''))) * 8
                 if val_w > max_w:
                     max_w = val_w
-            self._tree.column(col, width=min(max_w + 16, 250), anchor='w')
+            tree.column(col, width=min(max_w + 16, 250), anchor='w')
+
+        tree.tag_configure('oddrow', background=self._row_alt_color)
+        tree.tag_configure('evenrow', background=BG2)
 
         for i, row in enumerate(rows):
             vals = [str(row.get(c, '')) for c in cols]
             tag = 'oddrow' if i % 2 else 'evenrow'
-            self._tree.insert('', tk.END, values=vals, tags=(tag,))
+            tree.insert('', tk.END, values=vals, tags=(tag,))
 
-    def _clear_table(self):
-        for item in self._tree.get_children():
-            self._tree.delete(item)
+        y_scroll = ttk.Scrollbar(tab_frame, orient='vertical',
+                                  command=tree.yview,
+                                  style='Wiki.Vertical.TScrollbar')
+        x_scroll = ttk.Scrollbar(tab_frame, orient='horizontal',
+                                  command=tree.xview,
+                                  style='Wiki.Horizontal.TScrollbar')
+        tree.configure(yscrollcommand=y_scroll.set,
+                        xscrollcommand=x_scroll.set)
+        x_scroll.pack(side=tk.BOTTOM, fill='x')
+        tree.pack(side=tk.LEFT, fill='both', expand=True)
+        y_scroll.pack(side=tk.RIGHT, fill='y')
+
+        self._notebook.add(tab_frame, text=name)
+
+    def _populate_tables(self, tables):
+        """Populate notebook with one tab per table group."""
+        self._clear_tables()
+        for table_group in tables:
+            name = table_group.get('name', 'Table')
+            rows = table_group.get('rows', [])
+            self._add_table_tab(name, rows)
+
+    def _populate_table(self, rows):
+        """Populate notebook with a single tab showing a flat list of rows."""
+        self._clear_tables()
+        self._add_table_tab('Results', rows)
 
     # ---- Add entry ----
     def _add_entry(self):
@@ -791,17 +721,13 @@ class WikiWindow:
         self._url_entry.config(state='normal')
         self._url_var.set('')
         self._url_entry.config(state='readonly')
-        self._clear_table()
+        self._clear_tables()
         self._status_lbl.config(text='', fg=DIM)
 
     # ---- Regenerate (extract) ----
     def _regenerate_entry(self):
         if not self._selected_entry:
             self._status_lbl.config(text='No entry selected', fg=RED)
-            return
-        api_key = self._api_key_var.get().strip()
-        if not api_key:
-            self._status_lbl.config(text='Enter a Gemini API key first', fg=RED)
             return
 
         name = self._selected_entry
@@ -813,19 +739,21 @@ class WikiWindow:
             self._status_lbl.config(text='No URL set for this entry', fg=RED)
             return
 
-        provider = self._provider
-        self._status_lbl.config(text=f'Sending to {provider.upper()}...', fg=ACCENT)
+        self._status_lbl.config(text='Parsing tables...', fg=ACCENT)
         self._regen_btn.config(state='disabled')
 
         def _worker():
             try:
-                rows = extract_with_llm(provider, api_key, url)
-                entry['data'] = rows
+                tables = extract_wiki_data(url)
+                if not tables:
+                    self.panel.after(0, lambda: self._on_extract_error(
+                        'No tables found on this page'))
+                    return
+                entry['data'] = tables
                 entry['extracted_at'] = datetime.now().isoformat(
                     timespec='seconds')
-                self.data[f'{provider}_api_key'] = api_key
                 save_wiki_data(self.data)
-                self.panel.after(0, lambda: self._on_extract_done(name, rows))
+                self.panel.after(0, lambda: self._on_extract_done(name, tables))
             except Exception as e:
                 import traceback
                 traceback.print_exc()
@@ -834,13 +762,15 @@ class WikiWindow:
 
         Thread(target=_worker, daemon=True).start()
 
-    def _on_extract_done(self, name, rows):
+    def _on_extract_done(self, name, tables):
         self._regen_btn.config(state='normal')
         if self._selected_entry == name:
-            self._populate_table(rows)
+            self._populate_tables(tables)
+            total_rows = sum(len(t.get('rows', [])) for t in tables)
             ts = self.data['entries'][name].get('extracted_at', '')
             self._status_lbl.config(
-                text=f'{len(rows)} row(s) extracted  |  {ts}', fg=GREEN)
+                text=f'{total_rows} row(s) in {len(tables)} table(s)  |  {ts}',
+                fg=GREEN)
 
     def _on_extract_error(self, msg):
         self._regen_btn.config(state='normal')
@@ -995,9 +925,11 @@ class WikiSearchOverlay:
         x = self._win_x
         y = self._win_y + 46
         w = self._win_w
-        n = min(len(self._results), 8)
         item_h = 32
-        h = n * item_h + 4
+        avail = self.root.winfo_screenheight() - y - 40
+        max_visible = min(len(self._results), max(1, avail // item_h))
+        h = max_visible * item_h + 4
+        needs_scroll = len(self._results) > max_visible
 
         dd = tk.Toplevel(self.root)
         dd.overrideredirect(True)
@@ -1009,20 +941,37 @@ class WikiSearchOverlay:
         inner = tk.Frame(dd, bg=BG)
         inner.pack(fill='both', expand=True, padx=2, pady=2)
 
+        if needs_scroll:
+            canvas = tk.Canvas(inner, bg=BG, highlightthickness=0)
+            container = tk.Frame(canvas, bg=BG)
+            container.bind('<Configure>',
+                           lambda e: canvas.configure(scrollregion=canvas.bbox('all')))
+            canvas.create_window((0, 0), window=container, anchor='nw',
+                                width=w - 6)
+            canvas.pack(fill='both', expand=True)
+            def _on_wheel(e):
+                canvas.yview_scroll(-1 * (e.delta // 120), 'units')
+            canvas.bind('<MouseWheel>', _on_wheel)
+            container.bind('<MouseWheel>', _on_wheel)
+            parent = container
+        else:
+            parent = inner
+
         self._dropdown_items = []
-        for i, (entry_name, row, field, value) in enumerate(self._results[:8]):
-            item = tk.Frame(inner, bg=BG, cursor='hand2')
+        for i, (entry_name, row, field, value) in enumerate(self._results):
+            item = tk.Frame(parent, bg=BG, cursor='hand2')
             item.pack(fill='x')
 
-            # Entry name in accent, field:value in dim
+            # First column value as display name, entry name as detail
+            first_val = str(next(iter(row.values()), ''))
             name_lbl = tk.Label(
-                item, text=entry_name,
+                item, text=first_val,
                 font=('Consolas', 9, 'bold'), fg=ACCENT, bg=BG,
                 anchor='w')
             name_lbl.pack(side=tk.LEFT, padx=(10, 4))
 
             detail_lbl = tk.Label(
-                item, text=f'{field}: {value}',
+                item, text=entry_name,
                 font=('Consolas', 9), fg='#8b949e', bg=BG,
                 anchor='w')
             detail_lbl.pack(side=tk.LEFT, fill='x', expand=True, padx=(0, 10))
@@ -1038,6 +987,8 @@ class WikiSearchOverlay:
                             lambda e, idx=i: self._on_item_hover(idx))
                 widget.bind('<Button-1>',
                             lambda e, idx=i: self._on_item_click(idx))
+                if needs_scroll:
+                    widget.bind('<MouseWheel>', _on_wheel)
 
             self._dropdown_items.append({
                 'frame': item, 'name': name_lbl, 'detail': detail_lbl})
@@ -1104,20 +1055,15 @@ class WikiSearchOverlay:
         entry_name, row, _, _ = self._results[idx]
         self._close_tooltip()
 
-        # Position to the right of the search bar
-        tip_x = self._win_x + self._win_w + 10
-        tip_y = self._win_y
-        tip_w = 300
+        tip_w = 400
         # Filter out empty values for display
         items = [(k, v) for k, v in row.items() if str(v).strip()]
-        tip_h = len(items) * 22 + 44
 
         tip = tk.Toplevel(self.root)
         tip.overrideredirect(True)
         tip.attributes('-topmost', True)
         tip.attributes('-alpha', 0.97)
         tip.configure(bg='#1f6feb')
-        tip.geometry(f'{tip_w}x{tip_h}+{tip_x}+{tip_y}')
 
         inner = tk.Frame(tip, bg=BG)
         inner.pack(fill='both', expand=True, padx=2, pady=2)
@@ -1135,11 +1081,12 @@ class WikiSearchOverlay:
             row_f = tk.Frame(inner, bg=rbg)
             row_f.pack(fill='x')
             tk.Label(row_f, text=k, font=('Consolas', 8, 'bold'),
-                     fg=DIM, bg=rbg, anchor='w', width=12).pack(
+                     fg=DIM, bg=rbg, anchor='nw', width=12).pack(
                          side=tk.LEFT, padx=(8, 4), pady=1)
             tk.Label(row_f, text=str(v), font=('Consolas', 9),
-                     fg='#e6edf3', bg=rbg, anchor='w').pack(
-                         side=tk.LEFT, padx=(0, 8), pady=1)
+                     fg='#e6edf3', bg=rbg, anchor='w',
+                     wraplength=tip_w - 140).pack(
+                         side=tk.LEFT, fill='x', padx=(0, 8), pady=1)
 
         # "Open in Wiki" link
         link_f = tk.Frame(inner, bg=BG)
@@ -1153,6 +1100,19 @@ class WikiSearchOverlay:
                   lambda e, n=entry_name: self._open_in_wiki(n))
         link.bind('<Enter>', lambda e: link.config(fg='#70ffab'))
         link.bind('<Leave>', lambda e: link.config(fg=GREEN))
+
+        # Let Tkinter calculate natural height, then position and cap
+        tip.update_idletasks()
+        tip_h = tip.winfo_reqheight()
+        tip_x = self._win_x + self._win_w + 10
+        tip_y = self._win_y
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        # Flip to left side if tooltip goes off screen right
+        if tip_x + tip_w > screen_w:
+            tip_x = self._win_x - tip_w - 10
+        tip_h = min(tip_h, screen_h - tip_y - 40)
+        tip.geometry(f'{tip_w}x{tip_h}+{tip_x}+{tip_y}')
 
         self._tooltip = tip
         self._tooltip_after_id = self.root.after(10000, self._close_tooltip)

@@ -6,3 +6,8 @@ dist/
 *.spec
 *.exe
 agents.md
+ocr_tracker.py
+data/
+assets_tmp/
+autosell.json
+wiki.json

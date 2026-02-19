@@ -173,7 +173,7 @@ class LenkTools:
         self.hotkeys_enabled = True
 
         # Forge options enabled (I, O, P, U)
-        self.forge_enabled = True
+        self.forge_enabled = False
 
         # Radial menu state
         self._radial_menu = None
@@ -187,7 +187,7 @@ class LenkTools:
             {'label': 'Mini', 'icon': '\u25CB', 'toggle': self._toggle_mini_mode,
              'state': lambda: self._mini_mode},
             {'label': 'Wiki', 'icon': '\U0001f4d6', 'toggle': self._radial_wiki_search,
-             'state': lambda: self.wiki_panel_open},
+             'state': None},
         ]
 
         # Mini mode state

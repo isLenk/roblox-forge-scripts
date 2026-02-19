@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "mods": [
+    {
+      "id": "forge",
+      "name": "Forge",
+      "description": "Auto-forge: circle detection, smelting, bar game, auto-phase",
+      "version": "1.0.0",
+      "place_ids": [],
+      "wiki_url": "https://forge-roblox.fandom.com/wiki",
+      "builtin": true,
+      "module": "mods.forge.mod",
+      "class": "ForgeMod"
+    }
+  ]
+}
