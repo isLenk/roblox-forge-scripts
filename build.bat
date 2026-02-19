@@ -1,5 +1,5 @@
 @echo off
-pyinstaller --onefile --uac-admin --name LENK.TOOLS --noconsole --clean circle_bot.py
+pyinstaller --clean LENK.TOOLS.spec
 echo.
 echo Built: dist\LENK.TOOLS.exe
 pause

@@ -1,12 +1,10 @@
 """Mini mode overlay — compact floating indicator."""
 
-import io
 import sys
 import tkinter as tk
 import tkinter.font as tkfont
 from pathlib import Path
 
-import cairosvg
 from PIL import Image, ImageDraw, ImageTk
 
 from core.theme import GLASS_TOP, BG
@@ -73,11 +71,7 @@ class MiniMode:
         bg_img.paste(shine, (4, 1), shine)
 
         inner = sz - pad * 2
-        png_data = cairosvg.svg2png(
-            url=str(_ASSETS / 'logo.svg'),
-            output_width=inner * 4, output_height=inner * 4,
-        )
-        logo = Image.open(io.BytesIO(png_data)).convert('RGBA')
+        logo = Image.open(_ASSETS / 'logo.png').convert('RGBA')
         logo.thumbnail((inner, inner), Image.LANCZOS)
         lx = pad + (inner - logo.width) // 2
         ly = pad + (inner - logo.height) // 2

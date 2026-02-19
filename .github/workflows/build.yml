@@ -20,7 +20,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pyinstaller opencv-python-headless numpy mss keyboard Pillow cairosvg
+          pip install pyinstaller opencv-python-headless numpy mss keyboard Pillow
 
       - name: Read version
         id: version
